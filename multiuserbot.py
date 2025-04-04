@@ -1,11 +1,13 @@
-import telebot
+from flask import Flask, request
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
 import os
 import threading
 import time
 import logging
 from datetime import datetime, timedelta
 
-# Configure logging to output to console (Render logs this automatically)
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
@@ -13,15 +15,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-# Bot configuration
-BOT_TOKEN = os.getenv('7777704982:AAENdawbGbre5MjIP9F6ckBV2g3EiELBRj4')  # Set this in Render environment variables
-bot = telebot.TeleBot(BOT_TOKEN)
+# Flask app and Telegram bot setup
+app = Flask(__name__)
+BOT_TOKEN = os.getenv('BOT_TOKEN', '7777704982:AAENdawbGbre5MjIP9F6ckBV2g3EiELBRj4')  # Default token if not set in env
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher(bot, None, workers=0)
 
 # In-memory ride storage (resets on app restart)
 rides = []
 
-def get_user_identifier(message):
-    return f"@{message.from_user.username}" if message.from_user.username else f"User {message.chat.id}"
+# Utility functions
+def get_user_identifier(update):
+    user = update.message.from_user
+    return f"@{user.username}" if user.username else f"User {update.message.chat.id}"
 
 def format_datetime(dt_str):
     """Convert 'YYYY-MM-DD HH:MM:SS' to 'MMM DD H:MM AM/PM' (e.g., 'Apr 3 10:30 PM')."""
@@ -96,32 +102,29 @@ def parse_time(time_str):
             raise ValueError("Invalid time format. Use '22:30', '10:30pm', or '10pm'.")
     return f"{time_obj.hour:02d}:{time_obj.minute:02d}"
 
-@bot.message_handler(commands=['home'])
-def handle_home_command(message):
-    user = get_user_identifier(message)
+# Command handlers
+def handle_home_command(update, context):
+    user = get_user_identifier(update)
     logger.info(f"{user} ran /home")
-    bot.reply_to(message, "This command only works on the Raspberry Pi with home.py. Host me locally for full functionality!")
+    update.message.reply_text("This command only works on the Raspberry Pi with home.py. Host me locally for full functionality!")
 
-@bot.message_handler(commands=['cpu'])
-def handle_cpu_command(message):
-    user = get_user_identifier(message)
+def handle_cpu_command(update, context):
+    user = get_user_identifier(update)
     logger.info(f"{user} ran /cpu")
-    bot.reply_to(message, "This command only works on the Raspberry Pi with logger.py. Host me locally for full functionality!")
+    update.message.reply_text("This command only works on the Raspberry Pi with logger.py. Host me locally for full functionality!")
 
-@bot.message_handler(commands=['start'])
-def handle_start_command(message):
-    user = get_user_identifier(message)
+def handle_start_command(update, context):
+    user = get_user_identifier(update)
     logger.info(f"{user} ran /start")
-    bot.reply_to(message, "Welcome! Use /ride, /rides, /delride. Example: /ride Rinku on Apr 3 at 22:30\n/cpu and /home work only on Pi.")
+    update.message.reply_text("Welcome! Use /ride, /rides, /delride. Example: /ride Rinku on Apr 3 at 22:30\n/cpu and /home work only on Pi.")
 
-@bot.message_handler(commands=['ride'])
-def handle_ride_command(message):
-    user = get_user_identifier(message)
-    logger.info(f"{user} ran /ride: {message.text}")
+def handle_ride_command(update, context):
+    user = get_user_identifier(update)
+    logger.info(f"{user} ran /ride: {update.message.text}")
     try:
-        text = message.text[len('/ride'):].strip()
+        text = update.message.text[len('/ride'):].strip()
         if not text:
-            bot.reply_to(message, "Usage: /ride <event> on <date> at <time>\nExample: /ride Rinku on Apr 3 at 22:30")
+            update.message.reply_text("Usage: /ride <event> on <date> at <time>\nExample: /ride Rinku on Apr 3 at 22:30")
             return
         
         event, date_str, time_part = parse_ride_input(text)
@@ -139,52 +142,51 @@ def handle_ride_command(message):
             'event': event,
             'datetime': ride_datetime.strftime('%Y-%m-%d %H:%M:%S'),
             'created': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'chat_id': message.chat.id,
+            'chat_id': update.message.chat.id,
             'reminded_1day': False,
             'reminded_1hour': False,
             'reminded_10min': False
         }
         rides.append(ride)
-        bot.reply_to(message, f"Ride added: {event} on {format_datetime(ride['datetime'])}")
+        update.message.reply_text(f"Ride added: {event} on {format_datetime(ride['datetime'])}")
     except Exception as e:
-        bot.reply_to(message, f"Error: {str(e)}\nExample: /ride Rinku on Apr 3 at 22:30")
+        update.message.reply_text(f"Error: {str(e)}\nExample: /ride Rinku on Apr 3 at 22:30")
 
-@bot.message_handler(commands=['rides'])
-def handle_rides_command(message):
-    user = get_user_identifier(message)
+def handle_rides_command(update, context):
+    user = get_user_identifier(update)
     logger.info(f"{user} ran /rides")
     try:
-        user_rides = [ride for ride in rides if ride['chat_id'] == message.chat.id]
+        user_rides = [ride for ride in rides if ride['chat_id'] == update.message.chat.id]
         if not user_rides:
-            bot.reply_to(message, "No rides found for you.")
+            update.message.reply_text("No rides found for you.")
             return
         response = "🚗 Your Rides:\n"
         for ride in user_rides:
             response += f"{ride['id']}. {ride['event']} - Due: {format_datetime(ride['datetime'])}\n"
-        bot.reply_to(message, response)
+        update.message.reply_text(response)
     except Exception as e:
-        bot.reply_to(message, f"Error loading rides: {str(e)}")
+        update.message.reply_text(f"Error loading rides: {str(e)}")
 
-@bot.message_handler(commands=['delride'])
-def handle_delride_command(message):
-    user = get_user_identifier(message)
-    logger.info(f"{user} ran /delride: {message.text}")
+def handle_delride_command(update, context):
+    user = get_user_identifier(update)
+    logger.info(f"{user} ran /delride: {update.message.text}")
     try:
-        text = message.text[len('/delride'):].strip()
+        text = update.message.text[len('/delride'):].strip()
         if not text or not text.isdigit():
-            bot.reply_to(message, "Usage: /delride <ride_id>\nExample: /delride 1")
+            update.message.reply_text("Usage: /delride <ride_id>\nExample: /delride 1")
             return
         ride_id = int(text)
         global rides
         original_len = len(rides)
-        rides = [ride for ride in rides if not (ride['id'] == ride_id and ride['chat_id'] == message.chat.id)]
+        rides = [ride for ride in rides if not (ride['id'] == ride_id and ride['chat_id'] == update.message.chat.id)]
         if len(rides) == original_len:
-            bot.reply_to(message, f"No ride found with ID {ride_id} that belongs to you.")
+            update.message.reply_text(f"No ride found with ID {ride_id} that belongs to you.")
             return
-        bot.reply_to(message, f"Ride {ride_id} deleted successfully.")
+        update.message.reply_text(f"Ride {ride_id} deleted successfully.")
     except Exception as e:
-        bot.reply_to(message, f"Error: {str(e)}\nUsage: /delride <ride_id>")
+        update.message.reply_text(f"Error: {str(e)}\nUsage: /delride <ride_id>")
 
+# Reminder thread
 def check_rides():
     while True:
         try:
@@ -236,14 +238,29 @@ def check_rides():
             time.sleep(10)
         time.sleep(10)
 
-def main():
+# Webhook endpoint
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(), bot)
+    dp.process_update(update)
+    return "OK", 200
+
+# Register handlers
+dp.add_handler(CommandHandler("home", handle_home_command))
+dp.add_handler(CommandHandler("cpu", handle_cpu_command))
+dp.add_handler(CommandHandler("start", handle_start_command))
+dp.add_handler(CommandHandler("ride", handle_ride_command))
+dp.add_handler(CommandHandler("rides", handle_rides_command))
+dp.add_handler(CommandHandler("delride", handle_delride_command))
+dp.add_handler(MessageHandler(Filters.command, lambda update, context: update.message.reply_text("Unknown command. Try /start, /ride, /rides, /delride.")))
+
+# Start the reminder thread and Flask app
+if __name__ == "__main__":
     logger.info("Bot starting...")
     ride_thread = threading.Thread(target=check_rides, daemon=True)
     ride_thread.start()
     logger.info("Ride check thread started successfully")
-    bot.delete_webhook()
-    logger.info("Webhook deleted successfully")
-    bot.polling(none_stop=True, interval=0, timeout=60)
-
-if __name__ == "__main__":
-    main()
+    
+    # Set webhook dynamically (optional for local testing; set manually for production)
+    port = int(os.environ.get("PORT", 8443))  # Heroku/Render sets PORT
+    app.run(host="0.0.0.0", port=port)
